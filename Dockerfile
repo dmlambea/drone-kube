@@ -1,9 +1,8 @@
-FROM alpine:3.4
+FROM alpine:3.9
+LABEL maintainer 'Daniel M. Lambea <dmlambea@gmail.com>'
 
-RUN apk update && \
-  apk add \
-    ca-certificates && \
-  rm -rf /var/cache/apk/*
+RUN apk --no-cache add ca-certificates
 
-ADD drone-kube /bin/
+COPY drone-kube /bin/
+
 ENTRYPOINT ["/bin/drone-kube"]
