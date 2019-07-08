@@ -2,28 +2,30 @@ package main
 
 import (
 	"encoding/base64"
-	"fmt"
 	"io/ioutil"
 	"log"
-	"time"
 
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/pkg/api"
-	"k8s.io/client-go/pkg/api/v1"
-	"k8s.io/client-go/pkg/apis/extensions/v1beta1"
-	"k8s.io/client-go/pkg/runtime"
+	"github.com/pkg/errors"
+
+	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	utilyaml "k8s.io/kubernetes/pkg/util/yaml"
+	"k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/api/apps/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+
 )
 
 type (
-	Repo struct {
+	repo struct {
 		Owner string
 		Name  string
 	}
 
-	Build struct {
+	build struct {
 		Tag     string
 		Event   string
 		Number  int
@@ -37,11 +39,12 @@ type (
 		Created int64
 	}
 
-	Job struct {
+	job struct {
 		Started int64
 	}
 
-	Config struct {
+	config struct {
+		Kubeconfig string
 		Ca        string
 		Server    string
 		Token     string
@@ -49,77 +52,143 @@ type (
 		Template  string
 	}
 
-	Plugin struct {
-		Repo   Repo
-		Build  Build
-		Config Config
-		Job    Job
+	plugin struct {
+		Repo   repo
+		Build  build
+		Config config
+		Job    job
+		cs *k8s.Clientset
 	}
 )
 
-func (p Plugin) Exec() error {
+func (p plugin) exec() (err error) {
+	if err = p.initPlugin(); err != nil {
+		return errors.WithMessage(err, "initialization failed")
+	}
 
-	if p.Config.Server == "" {
-		log.Fatal("KUBE_SERVER is not defined")
+	var dep v1.Deployment
+	if dep, err = p.makeDeploymentDescriptor(); err != nil {
+		return errors.WithMessage(err, "unable to make deployment")
 	}
-	if p.Config.Token == "" {
-		log.Fatal("KUBE_TOKEN is not defined")
+
+	if err = p.updateOrCreateDeployment(dep); err != nil {
+		return errors.WithMessage(err, "unable to apply deployment")
 	}
-	if p.Config.Ca == "" {
-		log.Fatal("KUBE_CA is not defined")
+	return
+}
+
+func (p *plugin) initPlugin() (err error) {
+	if err = p.checkConfig(); err != nil {
+		return errors.WithMessage(err, "configuration error")
 	}
 	if p.Config.Namespace == "" {
 		p.Config.Namespace = "default"
 	}
-	if p.Config.Template == "" {
-		log.Fatal("KUBE_TEMPLATE, or template must be defined")
+
+	var clientCfg *rest.Config
+	if clientCfg, err = getClientConfig(p.Config); err != nil {
+		return errors.WithMessage(err, "unable to get client config")
 	}
 
-	// connect to Kubernetes
-	clientset, err := p.createKubeClient()
-	if err != nil {
-		log.Fatal(err.Error())
+	var clientSet *k8s.Clientset
+	if clientSet, err = kubernetes.NewForConfig(clientCfg); err != nil {
+		return errors.WithMessage(err, "unable to create Kubernetes client")
 	}
-
-	// parse the template file and do substitutions
-	txt, err := openAndSub(p.Config.Template, p)
-	if err != nil {
-		return err
-	}
-	// convert txt back to []byte and convert to json
-	json, err := utilyaml.ToJSON([]byte(txt))
-	if err != nil {
-		return err
-	}
-
-	var dep v1beta1.Deployment
-
-	e := runtime.DecodeInto(api.Codecs.UniversalDecoder(), json, &dep)
-	if e != nil {
-		log.Fatal("Error decoding yaml file to json", e)
-	}
-	// check and see if there is a deployment already.  If there is, update it.
-	oldDep, err := findDeployment(dep.ObjectMeta.Name, dep.ObjectMeta.Namespace, clientset)
-	if err != nil {
-		return err
-	}
-	if oldDep.ObjectMeta.Name == dep.ObjectMeta.Name {
-		// update the existing deployment, ignore the deployment that it comes back with
-		_, err = clientset.ExtensionsV1beta1().Deployments(p.Config.Namespace).Update(&dep)
-		return err
-	}
-	// create the new deployment since this never existed.
-	_, err = clientset.ExtensionsV1beta1().Deployments(p.Config.Namespace).Create(&dep)
-
-	return err
+	p.cs = clientSet
+	return nil
 }
 
-func findDeployment(depName string, namespace string, c *kubernetes.Clientset) (v1beta1.Deployment, error) {
+func (p plugin) makeDeploymentDescriptor() (deployment v1.Deployment, err error) {
+	var txt string
+	if txt, err = openAndSub(p.Config.Template, p); err != nil {
+		return deployment, errors.WithMessage(err, "template processing failed")
+	}
+	
+	decode := scheme.Codecs.UniversalDeserializer().Decode
+	var obj runtime.Object
+	if obj, _, err = decode([]byte(txt), nil, nil); err != nil {
+		return deployment, errors.WithMessagef(err, "unable to deserialize deployment: %v", txt)
+	}
+
+	dep := obj.(*v1.Deployment)
+	deployment = *dep
+	if deployment.ObjectMeta.Namespace == "" {
+		deployment.ObjectMeta.Namespace = "default"
+	}
+	return
+}
+
+func (p plugin) updateOrCreateDeployment(dep v1.Deployment) (err error) {
+	var currentDep v1.Deployment
+	if currentDep, err = findDeployment(dep.ObjectMeta.Name, dep.ObjectMeta.Namespace, p.cs); err != nil {
+		return errors.WithMessagef(err, "unable to find deployment %s/%s", dep.ObjectMeta.Namespace, dep.ObjectMeta.Name)
+	}
+
+	if currentDep.ObjectMeta.Name == dep.ObjectMeta.Name {
+		// update the existing deployment, ignore the deployment that it comes back with
+		_, err = p.cs.AppsV1().Deployments(p.Config.Namespace).Update(&dep)
+		return errors.WithMessagef(err, "unable to update deployment %s/%s", dep.ObjectMeta.Namespace, dep.ObjectMeta.Name)
+	}
+
+	// create the new deployment since this never existed.
+	_, err = p.cs.AppsV1().Deployments(p.Config.Namespace).Create(&dep)
+	return errors.WithMessagef(err, "unable to create deployment %s/%s", dep.ObjectMeta.Namespace, dep.ObjectMeta.Name)
+}
+
+func (p plugin) checkConfig() error {
+	if p.Config.Template == "" {
+		return errors.New("KUBE_TEMPLATE, or template must be defined")
+	}
+	if p.Config.Kubeconfig != "" {
+		return nil
+	}
+
+	if p.Config.Server == "" {
+		return errors.New("if not using KUBE_CONFIG, KUBE_SERVER must be defined")
+	}
+	if p.Config.Token == "" {
+		return errors.New("if not using KUBE_CONFIG, KUBE_TOKEN must be defined")
+	}
+	if p.Config.Ca == "" {
+		return errors.New("if not using KUBE_CONFIG, KUBE_CA must be defined")
+	}
+	return nil
+}
+
+func getClientConfig(cfg config) (*rest.Config, error) {
+	if cfg.Kubeconfig != "" {
+		return clientcmd.BuildConfigFromFlags("", cfg.Kubeconfig)
+	}
+
+	ca, err := base64.StdEncoding.DecodeString(cfg.Ca)
+	if err != nil {
+		return nil, errors.WithMessage(err, "unable to base64-decode CA")
+	}
+	defaultConfig := api.NewConfig()
+	defaultConfig.Clusters["drone"] = &api.Cluster{
+		Server:                   cfg.Server,
+		CertificateAuthorityData: ca,
+	}
+	defaultConfig.AuthInfos["drone"] = &api.AuthInfo{
+		Token: cfg.Token,
+	}
+
+	defaultConfig.Contexts["drone"] = &api.Context{
+		Cluster:  "drone",
+		AuthInfo: "drone",
+	}
+	defaultConfig.CurrentContext = "drone"
+
+	clientBuilder := clientcmd.NewNonInteractiveClientConfig(*defaultConfig, "drone", &clientcmd.ConfigOverrides{}, nil)
+	return clientBuilder.ClientConfig()
+}
+
+func findDeployment(depName string, namespace string, cs *k8s.Clientset) (v1.Deployment, error) {
 	if namespace == "" {
 		namespace = "default"
 	}
-	var d v1beta1.Deployment
-	deployments, err := listDeployments(c, namespace)
+	var d v1.Deployment
+	deployments, err := listDeployments(cs, namespace)
 	if err != nil {
 		return d, err
 	}
@@ -132,10 +201,10 @@ func findDeployment(depName string, namespace string, c *kubernetes.Clientset) (
 }
 
 // List the deployments
-func listDeployments(clientset *kubernetes.Clientset, namespace string) ([]v1beta1.Deployment, error) {
+func listDeployments(cs *k8s.Clientset, namespace string) ([]v1.Deployment, error) {
 	// docs on this:
 	// https://github.com/kubernetes/client-go/blob/master/pkg/apis/extensions/types.go
-	deployments, err := clientset.ExtensionsV1beta1().Deployments(namespace).List(v1.ListOptions{})
+	deployments, err := cs.AppsV1().Deployments(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -143,53 +212,10 @@ func listDeployments(clientset *kubernetes.Clientset, namespace string) ([]v1bet
 }
 
 // open up the template and then sub variables in. Handlebar stuff.
-func openAndSub(templateFile string, p Plugin) (string, error) {
+func openAndSub(templateFile string, p plugin) (string, error) {
 	t, err := ioutil.ReadFile(templateFile)
 	if err != nil {
 		return "", err
 	}
-	//potty humor!  Render trim toilet paper!  Ha ha, so funny.
 	return RenderTrim(string(t), p)
-}
-
-// create the connection to kubernetes based on parameters passed in.
-// the kubernetes/client-go project is really hard to understand.
-func (p Plugin) createKubeClient() (*kubernetes.Clientset, error) {
-
-	ca, err := base64.StdEncoding.DecodeString(p.Config.Ca)
-	config := clientcmdapi.NewConfig()
-	config.Clusters["drone"] = &clientcmdapi.Cluster{
-		Server: p.Config.Server,
-		CertificateAuthorityData: ca,
-	}
-	config.AuthInfos["drone"] = &clientcmdapi.AuthInfo{
-		Token: p.Config.Token,
-	}
-
-	config.Contexts["drone"] = &clientcmdapi.Context{
-		Cluster:  "drone",
-		AuthInfo: "drone",
-	}
-	//config.Clusters["drone"].CertificateAuthorityData = ca
-	config.CurrentContext = "drone"
-
-	clientBuilder := clientcmd.NewNonInteractiveClientConfig(*config, "drone", &clientcmd.ConfigOverrides{}, nil)
-	actualCfg, err := clientBuilder.ClientConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	return kubernetes.NewForConfig(actualCfg)
-}
-
-// Just an example from the client specification.  Code not really used.
-func watchPodCounts(clientset *kubernetes.Clientset) {
-	for {
-		pods, err := clientset.Core().Pods("").List(v1.ListOptions{})
-		if err != nil {
-			log.Fatal(err.Error())
-		}
-		fmt.Printf("There are %d pods in the cluster\n", len(pods.Items))
-		time.Sleep(10 * time.Second)
-	}
 }

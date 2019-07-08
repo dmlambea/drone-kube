@@ -9,14 +9,67 @@ import (
 	"github.com/urfave/cli"
 )
 
-var build = "0" // build number set at compile time
+var buildNumber = "0" // build number set at compile time
 
 func main() {
 	app := cli.NewApp()
 	app.Name = "drone-kube"
 	app.Action = run
-	app.Version = fmt.Sprintf("1.0.%s", build)
-	app.Flags = []cli.Flag{
+	app.Version = fmt.Sprintf("1.0.%s", buildNumber)
+	app.Flags = makeCliFlagArray()
+
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(c *cli.Context) error {
+	// kubernetes token
+	if c.String("env-file") != "" {
+		_ = godotenv.Load(c.String("env-file"))
+	}
+
+	plugin := plugin{
+		Repo: repo{
+			Owner: c.String("repo.owner"),
+			Name:  c.String("repo.name"),
+		},
+		Build: build{
+			Tag:     c.String("build.tag"),
+			Number:  c.Int("build.number"),
+			Event:   c.String("build.event"),
+			Status:  c.String("build.status"),
+			Commit:  c.String("commit.sha"),
+			Ref:     c.String("commit.ref"),
+			Branch:  c.String("commit.branch"),
+			Author:  c.String("commit.author"),
+			Link:    c.String("build.link"),
+			Started: c.Int64("build.started"),
+			Created: c.Int64("build.created"),
+		},
+		Job: job{
+			Started: c.Int64("job.started"),
+		},
+		Config: config{
+			Kubeconfig: c.String("kubeconfig"),
+			Token:      c.String("token"),
+			Server:     c.String("server"),
+			Ca:         c.String("ca"),
+			Namespace:  c.String("namespace"),
+			Template:   c.String("template"),
+		},
+	}
+
+	return plugin.exec()
+}
+
+func makeCliFlagArray() []cli.Flag {
+	return []cli.Flag{
+		cli.StringFlag{
+			Name:   "kubeconfig",
+			Usage:  "Kubernetes config file",
+			EnvVar: "KUBE_CONFIG",
+		},
 		cli.StringFlag{
 			Name:   "token",
 			Usage:  "Kubernetes token used by user to talk to app",
@@ -112,48 +165,4 @@ func main() {
 			EnvVar: "DRONE_TAG",
 		},
 	}
-
-	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func run(c *cli.Context) error {
-	// kubernetes token
-
-	if c.String("env-file") != "" {
-		_ = godotenv.Load(c.String("env-file"))
-	}
-
-	plugin := Plugin{
-		Repo: Repo{
-			Owner: c.String("repo.owner"),
-			Name:  c.String("repo.name"),
-		},
-		Build: Build{
-			Tag:     c.String("build.tag"),
-			Number:  c.Int("build.number"),
-			Event:   c.String("build.event"),
-			Status:  c.String("build.status"),
-			Commit:  c.String("commit.sha"),
-			Ref:     c.String("commit.ref"),
-			Branch:  c.String("commit.branch"),
-			Author:  c.String("commit.author"),
-			Link:    c.String("build.link"),
-			Started: c.Int64("build.started"),
-			Created: c.Int64("build.created"),
-		},
-		Job: Job{
-			Started: c.Int64("job.started"),
-		},
-		Config: Config{
-			Token:     c.String("token"),
-			Server:    c.String("server"),
-			Ca:        c.String("ca"),
-			Namespace: c.String("namespace"),
-			Template:  c.String("template"),
-		},
-	}
-
-	return plugin.Exec()
 }
