@@ -4,20 +4,22 @@ import (
 	"encoding/base64"
 	"io/ioutil"
 	"log"
+	"os"
 
 	"github.com/pkg/errors"
 
-	k8s "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd/api"
 )
+
+const defaultCAFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
 type (
 	repo struct {
@@ -45,11 +47,13 @@ type (
 
 	config struct {
 		Kubeconfig string
-		Ca        string
-		Server    string
-		Token     string
-		Namespace string
-		Template  string
+		ClientCert string
+		ClientKey  string
+		Ca         string
+		Server     string
+		Token      string
+		Namespace  string
+		Template   string
 	}
 
 	plugin struct {
@@ -57,7 +61,7 @@ type (
 		Build  build
 		Config config
 		Job    job
-		cs *k8s.Clientset
+		cs     *k8s.Clientset
 	}
 )
 
@@ -103,7 +107,7 @@ func (p plugin) makeDeploymentDescriptor() (deployment v1.Deployment, err error)
 	if txt, err = openAndSub(p.Config.Template, p); err != nil {
 		return deployment, errors.WithMessage(err, "template processing failed")
 	}
-	
+
 	decode := scheme.Codecs.UniversalDeserializer().Decode
 	var obj runtime.Object
 	if obj, _, err = decode([]byte(txt), nil, nil); err != nil {
@@ -146,11 +150,16 @@ func (p plugin) checkConfig() error {
 	if p.Config.Server == "" {
 		return errors.New("if not using KUBE_CONFIG, KUBE_SERVER must be defined")
 	}
-	if p.Config.Token == "" {
-		return errors.New("if not using KUBE_CONFIG, KUBE_TOKEN must be defined")
-	}
 	if p.Config.Ca == "" {
-		return errors.New("if not using KUBE_CONFIG, KUBE_CA must be defined")
+		if _, err := os.Stat(defaultCAFile); os.IsNotExist(err) {
+			return errors.Errorf("if not using KUBE_CONFIG and no default CA file %s exists, KUBE_CA must be defined", defaultCAFile)
+		}
+	}
+	if p.Config.ClientCert != "" && p.Config.ClientKey != "" {
+		return nil
+	}
+	if p.Config.Token == "" {
+		return errors.New("no KUBE_CONFIG, client certificate nor KUBE_TOKEN defined")
 	}
 	return nil
 }
@@ -160,19 +169,25 @@ func getClientConfig(cfg config) (*rest.Config, error) {
 		return clientcmd.BuildConfigFromFlags("", cfg.Kubeconfig)
 	}
 
-	ca, err := base64.StdEncoding.DecodeString(cfg.Ca)
-	if err != nil {
-		return nil, errors.WithMessage(err, "unable to base64-decode CA")
-	}
 	defaultConfig := api.NewConfig()
 	defaultConfig.Clusters["drone"] = &api.Cluster{
-		Server:                   cfg.Server,
-		CertificateAuthorityData: ca,
+		Server:               cfg.Server,
+		CertificateAuthority: defaultCAFile,
 	}
-	defaultConfig.AuthInfos["drone"] = &api.AuthInfo{
-		Token: cfg.Token,
+	if cfg.Ca != "" {
+		ca, err := base64.StdEncoding.DecodeString(cfg.Ca)
+		if err != nil {
+			return nil, errors.WithMessage(err, "unable to base64-decode CA")
+		}
+		defaultConfig.Clusters["drone"].CertificateAuthorityData = ca
 	}
 
+	authInfo := api.AuthInfo{
+		Token:             cfg.Token,
+		ClientCertificate: cfg.ClientCert,
+		ClientKey:         cfg.ClientKey,
+	}
+	defaultConfig.AuthInfos["drone"] = &authInfo
 	defaultConfig.Contexts["drone"] = &api.Context{
 		Cluster:  "drone",
 		AuthInfo: "drone",
