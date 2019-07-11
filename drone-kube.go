@@ -14,6 +14,7 @@ var buildNumber = "0" // build number set at compile time
 func main() {
 	app := cli.NewApp()
 	app.Name = "drone-kube"
+	app.Usage = "Kubernetes Deployment plugin for Drone"
 	app.Action = run
 	app.Version = fmt.Sprintf("1.0.%s", buildNumber)
 	app.Flags = makeCliFlagArray()
@@ -52,6 +53,8 @@ func run(c *cli.Context) error {
 		},
 		Config: config{
 			Kubeconfig: c.String("kubeconfig"),
+			ClientCert: c.String("clientcert"),
+			ClientKey:  c.String("clientkey"),
 			Token:      c.String("token"),
 			Server:     c.String("server"),
 			Ca:         c.String("ca"),
@@ -71,8 +74,18 @@ func makeCliFlagArray() []cli.Flag {
 			EnvVar: "KUBE_CONFIG",
 		},
 		cli.StringFlag{
+			Name:   "clientcert",
+			Usage:  "PEM-encoded client certificate file",
+			EnvVar: "KUBE_CLIENT_CERT",
+		},
+		cli.StringFlag{
+			Name:   "clientkey",
+			Usage:  "PEM-encoded client certificate key file",
+			EnvVar: "KUBE_CLIENT_KEY",
+		},
+		cli.StringFlag{
 			Name:   "token",
-			Usage:  "Kubernetes token used by user to talk to app",
+			Usage:  "Kubernetes bearer token",
 			EnvVar: "KUBE_TOKEN,PLUGIN_TOKEN",
 		},
 		cli.StringFlag{
