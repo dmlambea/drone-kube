@@ -2,41 +2,54 @@
 This drone kubernetes plugin does the equivalent of: 
 
 ```
-kubectl apply -f deployment.yaml
+kubectl apply -f object.yaml
 ```
 
-If the deployment does not exists, it will be created.
+Currently supported objects are:
+* apps/v1 Deployment
+* batch/v1beta1 CronJob
 
-The advantages of this plugin is that the ```deployment.yaml``` file can be a template file.  We are able to substitute values like ```{{ build.number }}``` inside the file so you can update docker image names. 
+If the object does not exists, it will be created.
+
+The advantages of this plugin is that the ```object.yaml``` file can be a template file.  We are able to substitute values like ```{{ build.number }}``` inside the file so you can update docker image names. 
 
 Basic example: 
 
 ```yaml
 pipeline:
-  deploy:
-  	 image: dmlambea/drone-kube
-     template: deployment.yaml
+  
+steps:
+  - name: deploy
+  	image: dmlambea/drone-kube
+    settings:
+      template: deployment.yaml
 ```
 
 Example configuration with non-default namespace:
 
 ```diff
 pipeline:
-  kube:
-  	image: dmlambea/drone-kube
-    template: deployment.yaml
-+   namespace: mynamespace
+  
+steps:
+  - name: deploy
+    image: dmlambea/drone-kube
+    settings:
+      template: deployment.yaml
++     namespace: mynamespace
 ```
 
 You can also specify the server in the configuration as well.  It could alternatively be specified as an environment variable as shown in the next section. 
 
 ```diff
 pipeline:
-  kubernetes:
-  	image: dmlambea/drone-kube
-    template: deployment.yaml
-+   namespace: mynamespace
-+   server: https://10.93.234.28:6433
+  
+steps:
+  - name: deploy
+    image: dmlambea/drone-kube
+    settings:
+      template: deployment.yaml
++     namespace: mynamespace
++     server: https://10.93.234.28:6433
 ```
 
 ## Secrets
