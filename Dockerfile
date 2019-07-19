@@ -5,6 +5,7 @@ RUN apk --no-cache add binutils git
 
 COPY go.* $GOPATH/staging/
 COPY *.go $GOPATH/staging/
+COPY internal $GOPATH/staging/internal
 
 ## Build and strip the final binary
 RUN cd $GOPATH/staging/ && \
