@@ -3,13 +3,9 @@ package main
 import (
 	"encoding/base64"
 	"io/ioutil"
-	"log"
 	"os"
 
 	"github.com/pkg/errors"
-
-	"k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	k8s "k8s.io/client-go/kubernetes"
@@ -17,6 +13,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
+
+	"github.com/dmlambea/drone-kube/internal/kube"
 )
 
 const defaultCAFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -70,13 +68,13 @@ func (p plugin) exec() (err error) {
 		return errors.WithMessage(err, "initialization failed")
 	}
 
-	var dep v1.Deployment
-	if dep, err = p.makeDeploymentDescriptor(); err != nil {
-		return errors.WithMessage(err, "unable to make deployment")
+	var obj runtime.Object
+	if obj, err = p.makeObjectDescriptor(); err != nil {
+		return errors.WithMessage(err, "unable to make object descriptor")
 	}
 
-	if err = p.updateOrCreateDeployment(dep); err != nil {
-		return errors.WithMessage(err, "unable to apply deployment")
+	if err = p.updateOrCreateObject(obj); err != nil {
+		return errors.WithMessage(err, "unable to apply descriptor")
 	}
 	return
 }
@@ -102,41 +100,28 @@ func (p *plugin) initPlugin() (err error) {
 	return nil
 }
 
-func (p plugin) makeDeploymentDescriptor() (deployment v1.Deployment, err error) {
+func (p plugin) makeObjectDescriptor() (obj runtime.Object, err error) {
 	var txt string
 	if txt, err = openAndSub(p.Config.Template, p); err != nil {
-		return deployment, errors.WithMessage(err, "template processing failed")
+		err = errors.WithMessage(err, "template processing failed")
+		return
 	}
 
 	decode := scheme.Codecs.UniversalDeserializer().Decode
-	var obj runtime.Object
 	if obj, _, err = decode([]byte(txt), nil, nil); err != nil {
-		return deployment, errors.WithMessagef(err, "unable to deserialize deployment: %v", txt)
-	}
-
-	dep := obj.(*v1.Deployment)
-	deployment = *dep
-	if deployment.ObjectMeta.Namespace == "" {
-		deployment.ObjectMeta.Namespace = "default"
+		err = errors.WithMessagef(err, "unable to deserialize object: %v", txt)
 	}
 	return
 }
 
-func (p plugin) updateOrCreateDeployment(dep v1.Deployment) (err error) {
-	var currentDep v1.Deployment
-	if currentDep, err = findDeployment(dep.ObjectMeta.Name, dep.ObjectMeta.Namespace, p.cs); err != nil {
-		return errors.WithMessagef(err, "unable to find deployment %s/%s", dep.ObjectMeta.Namespace, dep.ObjectMeta.Name)
+func (p plugin) updateOrCreateObject(obj runtime.Object) (err error) {
+	f := kube.GetApplyFunc(obj)
+	if f == nil {
+		k := obj.GetObjectKind().GroupVersionKind()
+		return errors.Errorf("unsupported object kind %s %s/%s", k.Kind, k.Group, k.Version)
 	}
 
-	if currentDep.ObjectMeta.Name == dep.ObjectMeta.Name {
-		// update the existing deployment, ignore the deployment that it comes back with
-		_, err = p.cs.AppsV1().Deployments(p.Config.Namespace).Update(&dep)
-		return errors.WithMessagef(err, "unable to update deployment %s/%s", dep.ObjectMeta.Namespace, dep.ObjectMeta.Name)
-	}
-
-	// create the new deployment since this never existed.
-	_, err = p.cs.AppsV1().Deployments(p.Config.Namespace).Create(&dep)
-	return errors.WithMessagef(err, "unable to create deployment %s/%s", dep.ObjectMeta.Namespace, dep.ObjectMeta.Name)
+	return f(p.cs, p.Config.Namespace, obj)
 }
 
 func (p plugin) checkConfig() error {
@@ -196,34 +181,6 @@ func getClientConfig(cfg config) (*rest.Config, error) {
 
 	clientBuilder := clientcmd.NewNonInteractiveClientConfig(*defaultConfig, "drone", &clientcmd.ConfigOverrides{}, nil)
 	return clientBuilder.ClientConfig()
-}
-
-func findDeployment(depName string, namespace string, cs *k8s.Clientset) (v1.Deployment, error) {
-	if namespace == "" {
-		namespace = "default"
-	}
-	var d v1.Deployment
-	deployments, err := listDeployments(cs, namespace)
-	if err != nil {
-		return d, err
-	}
-	for _, thisDep := range deployments {
-		if thisDep.ObjectMeta.Name == depName {
-			return thisDep, err
-		}
-	}
-	return d, err
-}
-
-// List the deployments
-func listDeployments(cs *k8s.Clientset, namespace string) ([]v1.Deployment, error) {
-	// docs on this:
-	// https://github.com/kubernetes/client-go/blob/master/pkg/apis/extensions/types.go
-	deployments, err := cs.AppsV1().Deployments(namespace).List(metav1.ListOptions{})
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-	return deployments.Items, err
 }
 
 // open up the template and then sub variables in. Handlebar stuff.
