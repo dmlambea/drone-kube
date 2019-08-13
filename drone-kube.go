@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
 
@@ -9,18 +8,18 @@ import (
 	"github.com/urfave/cli"
 )
 
-var buildNumber = "0" // build number set at compile time
+var versionNumber = "0.0.0" // version number set at compile time
 
 func main() {
 	app := cli.NewApp()
 	app.Name = "drone-kube"
 	app.Usage = "Kubernetes Deployment plugin for Drone"
 	app.Action = run
-	app.Version = fmt.Sprintf("1.0.%s", buildNumber)
+	app.Version = versionNumber
 	app.Flags = makeCliFlagArray()
 
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		log.Fatalf("Execution failed: %v", err)
 	}
 }
 
