@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"io/ioutil"
 	"os"
+	"regexp"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -68,13 +69,15 @@ func (p plugin) exec() (err error) {
 		return errors.WithMessage(err, "initialization failed")
 	}
 
-	var obj runtime.Object
-	if obj, err = p.makeObjectDescriptor(); err != nil {
-		return errors.WithMessage(err, "unable to make object descriptor")
+	var objs []runtime.Object
+	if objs, err = p.makeObjectDescriptors(); err != nil {
+		return errors.WithMessage(err, "unable to make object descriptors")
 	}
 
-	if err = p.updateOrCreateObject(obj); err != nil {
-		return errors.WithMessage(err, "unable to apply descriptor")
+	for idx, o := range objs {
+		if err = p.updateOrCreateObject(o); err != nil {
+			return errors.WithMessagef(err, "unable to apply descriptor %d", idx)
+		}
 	}
 	return
 }
@@ -100,7 +103,7 @@ func (p *plugin) initPlugin() (err error) {
 	return nil
 }
 
-func (p plugin) makeObjectDescriptor() (obj runtime.Object, err error) {
+func (p plugin) makeObjectDescriptors() (obj []runtime.Object, err error) {
 	var txt string
 	if txt, err = openAndSub(p.Config.Template, p); err != nil {
 		err = errors.WithMessage(err, "template processing failed")
@@ -108,8 +111,14 @@ func (p plugin) makeObjectDescriptor() (obj runtime.Object, err error) {
 	}
 
 	decode := scheme.Codecs.UniversalDeserializer().Decode
-	if obj, _, err = decode([]byte(txt), nil, nil); err != nil {
-		err = errors.WithMessagef(err, "unable to deserialize object: %v", txt)
+	chunks := regexp.MustCompile("---[[:space:]]*\n").Split(txt, -1)
+	for idx, c := range chunks {
+		var o runtime.Object
+		if o, _, err = decode([]byte(c), nil, nil); err != nil {
+			err = errors.WithMessagef(err, "unable to deserialize object %d: %v", idx, c)
+			break
+		}
+		obj = append(obj, o)
 	}
 	return
 }
