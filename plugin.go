@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"regexp"
@@ -112,7 +113,9 @@ func (p plugin) makeObjectDescriptors() (obj []runtime.Object, err error) {
 
 	decode := scheme.Codecs.UniversalDeserializer().Decode
 	chunks := regexp.MustCompile("---[[:space:]]*\n").Split(txt, -1)
+	fmt.Printf("%d documents found\n", len(chunks))
 	for idx, c := range chunks {
+		fmt.Printf(" - Parsing document %d\n", idx)
 		var o runtime.Object
 		if o, _, err = decode([]byte(c), nil, nil); err != nil {
 			err = errors.WithMessagef(err, "unable to deserialize object %d: %v", idx, c)
@@ -124,13 +127,13 @@ func (p plugin) makeObjectDescriptors() (obj []runtime.Object, err error) {
 }
 
 func (p plugin) updateOrCreateObject(obj runtime.Object) (err error) {
-	f := kube.GetApplyFunc(obj)
-	if f == nil {
-		k := obj.GetObjectKind().GroupVersionKind()
-		return errors.Errorf("unsupported object kind %s %s/%s", k.Kind, k.Group, k.Version)
-	}
+	k := obj.GetObjectKind().GroupVersionKind()
+	fmt.Printf("Creating/updating object %s %s/%s\n", k.Kind, k.Group, k.Version)
 
-	return f(p.cs, p.Config.Namespace, obj)
+	if f := kube.GetApplyFunc(obj); f != nil {
+		return f(p.cs, p.Config.Namespace, obj)
+	}
+	return errors.Errorf("unsupported object kind %s %s/%s", k.Kind, k.Group, k.Version)
 }
 
 func (p plugin) checkConfig() error {
